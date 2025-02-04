@@ -3,6 +3,7 @@ from decimal import *
 import random
 from collections import defaultdict
 import re
+from time import time
 import sys
 
 # Set the maximum recursion depth to 2000
@@ -11,9 +12,9 @@ sys.setrecursionlimit(20000)
 
 class Watermark():
     def __init__(self, N, pipd=0.04):
-        self.insmax = 10
+        self.insmax = 100
         self.Ps = Decimal(0.00)
-        self.Pi = Decimal(pipd) # retest sd if these are changed
+        self.Pi = Decimal(pipd) 
         self.Pd = Decimal(pipd)
         self.Pt = Decimal(1) - (self.Pi + self.Pd)
         self.limiting = True
@@ -25,15 +26,19 @@ class Watermark():
         self.F_store  = defaultdict(dict)
         self.B_store  = defaultdict(dict)
         self.priors = None
-        self.using_edge = False
+        self.using_edge = False # whether to use the rigt-most column of the trellis
 
     def reset_store(self):
+        # reset forward and backward probabilities 
         self.F_store = defaultdict(dict)
         self.B_store = defaultdict(dict)
 
     def over_limit(self, i, j):
+        # check if location within 5 sd of diagonal
+        if abs(i - j) < 10:
+            return False
         # max_drift = 5 * i**0.5 / 3 # set for pi = pd = 0.1
-        max_drift = 3 * i **0.5 / 2.1 # for pi=pd=0.04
+        max_drift = 3 * i **0.5 / 2.1 # for pi=pd=0.04, found through simulations
         if abs(i - j) > max_drift:
             return True
         else:
@@ -44,11 +49,11 @@ class Watermark():
         for i in range(self.N):
             r = random.random()
             w.append(1) if r < d else w.append(0)
-        
         assert len(w) == self.N
         return w
 
     def sparse(self, d):
+        # sparsify data to have length N
         s = []
         info = []
         f = len(d) / self.N
@@ -72,6 +77,7 @@ class Watermark():
         return sum
     
     def channel(self, data):
+        id_events = 0
         r = []
         p = random.random()
         i = 0
@@ -79,6 +85,7 @@ class Watermark():
         while i < len(data):
             if self.Pi < p < (self.Pi + self.Pd):
                 i += 1
+                id_events += 1
                 ins = 0
             elif p > (self.Pi + self.Pd):
                 if random.random() < self.Ps:
@@ -91,24 +98,22 @@ class Watermark():
                 if ins < self.insmax:
                     r.append(0) if random.random() < 0.5 else r.append(1)
                     ins += 1
-            # else:
-            #   print("Got to insmax")
+                    id_events += 1
             p = random.random()
-        return r
+        print(f"Passed through channel with {id_events} id events")
+        return r, id_events
 
     def send_data(self, data):
+        # sparsify data, add to w and send through channel
         self.data = data
         assert len(data) < self.N
         self.s, self.info = self.sparse(data)
         t = self.add2(self.w, self.s)
-        self.r = self.channel(t)
+        self.r, id_ev = self.channel(t)
         self.Nr = len(self.r)
 
     def compute_forward(self, i, j, logging=False):
-        if self.over_limit(i, j) and self.limiting:
-            # print(f"Skipped {i, j}")
-            f = 0
-        elif i == 0 and j == 0:
+        if i == 0 and j == 0:
             f = Decimal(1)
         elif i == 0:
             f = self.forward(i, j - 1)*self.gamma(i, j - 1, i, j)
@@ -127,18 +132,14 @@ class Watermark():
         return f
     
     def compute_backward(self, i, j, logging=False):
-        if self.over_limit(i, j) and self.limiting:
-            # print(f"Skipped {i, j}")
-            b = 0
-        elif i == self.N and j == self.Nr:
+        if i == self.N and j == self.Nr:
             b = Decimal(1)
         elif i == self.N:
             if self.using_edge:
                 b = self.backward(i, j + 1, logging)*self.gamma(i, j, i, j + 1)
-            # print("Using edge")
+            # Control if we can end on insertions
             else:
                 b = 0
-            # print("Not using edge")
         elif j == self.Nr:
             b = self.backward(i + 1, j)*self.gamma(i, j, i + 1, j)
         elif i > self.N or j > self.Nr:
@@ -146,7 +147,7 @@ class Watermark():
         elif i < 0 or j < 0:
             b = 0
         else:
-            b = self.backward(i + 1, j, logging)*self.gamma(i, j, i + 1, j) + self.backward(i, j + 1, logging)*self.gamma(i, j, i, j + 1) + self.backward(i + 1, j + 1, logging) * self.gamma(i , j , i + 1, j+ 1)
+            b = self.backward(i + 1, j, logging)*self.gamma(i, j, i + 1, j) + self.backward(i, j + 1, logging)*self.gamma(i, j, i, j + 1) + self.backward(i + 1, j + 1, logging)*self.gamma(i , j , i + 1, j + 1)
         if b == 0:
             b = Decimal(0)
         self.B_store[i][j] = b
@@ -158,18 +159,17 @@ class Watermark():
         elif i2 == i1 + 1 and j2 == j1:
             g = self.Pd
         elif i2 == i1 + 1 and j2 == j1 + 1:
-            if i1 not in self.info:
+            if i1 not in self.info: # not a data bit, just watermark
             # print(f"Comparing rec{j1} and w{i1}")
                 if self.r[j1] == self.w[i1]:
                     g = self.Pt*(1 - self.Ps)
                 else:
                     g = self.Pt*self.Ps
             else:
-                # print(info, i1)
-                ind = self.info.index(i1)
-                # print(ind)
+                ind = self.info.index(i1) # Index in data string
                 p = Decimal(self.priors[ind]) # prior probability that bit is 0
-                if (self.r[j1] + self.w[i1]) % 2 == 1:
+                
+                if (self.r[j1] + self.w[i1]) % 2 == 1: #
                     g = p * self.Pt * self.Ps + (1 - p) * self.Pt * (1 - self.Ps)
                     # print(f"Probability that bit is zero is {p}, prob that became 1 is {g}")
                 else:
@@ -180,40 +180,42 @@ class Watermark():
         return Decimal(g)
     
     def forward(self, i, j, logging=False):
+        if self.over_limit(i, j) and self.limiting:
+            return 0
         if i in self.F_store:
             if j in self.F_store[i]:
                 return self.F_store[i][j]
         return self.compute_forward(i, j, logging)
     
     def backward(self, i, j, logging=False):
+        if self.over_limit(i, j) and self.limiting:
+            return 0
         if i in self.B_store:
             if j in self.B_store[i]:
                 return self.B_store[i][j]
         return self.compute_backward(i, j, logging)
     
     def likelihood(self, i, val):
-        l = 0
+        l = Decimal(0)
         for j in range(self.Nr):
-            if self.over_limit(i, j):
-            # print(f"Skipped {i, j}")
+            if self.over_limit(i, j) and self.limiting:
                 continue
             if self.r[j] == (val + self.w[i]) % 2:
-            # print(f"matches in row {j}, {rec[j]} = {val} + {w[i]}")
                 diag = self.Pt*(1 - self.Ps)
             else:
                 diag = self.Pt*self.Ps
-            # print(f"Does not match in row {j}, {rec[j]} = {val} + {w[i]}")
-            # print(f"Doing {i, j}")
+
             l2 = self.forward(i, j) * diag * self.backward(i + 1, j + 1)
             l += l2
-            #print(l2)
+    
             l3 = self.forward(i, j) * self.Pd * self.backward(i + 1, j)
             l += l3
-            #print(l3)
+  
         l += self.forward(i, self.Nr) * self.Pd * self.backward(i + 1, self.Nr) # top row of trellis
         return l
     
     def mix_strings(self, s1, s2, p):
+        # Function to vary priors for testing
         assert len(s1) == len(s2)
         new = []
         for i in range(len(s1)):
@@ -224,6 +226,8 @@ class Watermark():
         return new
     
     def decode(self, llr_file, prior_file=None):
+        # Takes in priors file and writes llr file
+        t1 = time()
         successes = 0
         llrs = []
         one_llrs = []
@@ -239,6 +243,7 @@ class Watermark():
                 for m in matches:
                     self.priors.append(1 - float(m))
         # print(f"PRIORS: {self.priors}")
+        
         for j in range(len(self.data)):
             p_win = 0
             pr = [0, 0]
@@ -247,7 +252,6 @@ class Watermark():
                 if p_ans == 0:
                 # print(f"Got zero from info bit {j} at position {info[j]}")
                     pass
-                # print(p_ans)
                 pr[v] = p_ans
                 if p_win <= p_ans:
                     p_win = p_ans
@@ -266,6 +270,7 @@ class Watermark():
             if ans == self.data[j]:
                 successes += 1
         # print(f"LLRS: {llrs}")
+        
         st = ''
         for cl in llrs:
             s = str(cl)
@@ -274,4 +279,4 @@ class Watermark():
         with open(llr_file, 'w') as f:
             f.write(st)
             f.close()
-        print(f"{successes}/{len(self.data)} successes")
+        print(f"{successes}/{len(self.data)} successes, ran in {time() - t1} s")
