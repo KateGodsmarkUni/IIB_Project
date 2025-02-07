@@ -1,6 +1,7 @@
 from Watermark import Watermark
 from LDPC import LDPC
 import random
+import tracemalloc
 
 def generate_data(L, p=0.5):
     data = [0] * L
@@ -32,30 +33,33 @@ def main():
     n_checks = N - K
     NW = 4000
     
+    tracemalloc.start()
     m_data = generate_data(K)
-    l_code = LDPC("code24", [2, 0.5, 3, 0.5], N, n_checks)
+    l_code = LDPC("code89", [2, 0.5, 3, 0.5], N, n_checks)
     list_to_file(m_data, f"{test_name}_m_data")
     l_code.encode(f"{test_name}_m_data", f"{test_name}_d_data")
     d_data = file_to_list(f"{test_name}_d_data")
     
     w1 = Watermark(NW, pipd=0.04)
     w1.send_data(d_data)
-    w1.decode(f"{test_name}_llrs")
 
-    l_code.decode(f"{test_name}_llrs", f"{test_name}_out", max_iters=20)
+    w1.c_decode(f"{test_name}_llr", test_name=test_name)
+    # w1.decode(f"{test_name}_llrs", prior_file=f"{test_name}_outp")
+
+    # print(tracemalloc.get_traced_memory())
+    # tracemalloc.stop()
+
+    l_code.decode(f"{test_name}_llr", f"{test_name}_out", max_iters=20)
 
     for i in range(20):
         w1.reset_store()
-        w1.decode(f"{test_name}_llrs", prior_file=f"{test_name}_outp")
-        l_code.decode(f"{test_name}_llrs", f"{test_name}_out", max_iters=20)
+        w1.c_decode(f"{test_name}_llr", prior_file=f"{test_name}_outp", test_name=test_name)
+        l_code.decode(f"{test_name}_llr", f"{test_name}_out", max_iters=20)
         if i > 0:
             if file_to_list(f"{test_name}_d_data") == file_to_list(f"{test_name}_out"):
                 print("SUCCESS!!!")
                 # l_code.extract(f"{test_name}_out", f"{test_name}_message")
                 break
-
-
-
 
 
 if __name__ == '__main__':

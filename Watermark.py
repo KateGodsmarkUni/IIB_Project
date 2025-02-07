@@ -5,7 +5,21 @@ from collections import defaultdict
 import re
 from time import time
 import sys
+import os.path
+import subprocess
 
+import subprocess
+
+def execute(cmd):
+    popen = subprocess.Popen(cmd, stdout=subprocess.PIPE, universal_newlines=True)
+    # for line in popen.stdout: 
+    #     print(line.decode(), end='')
+    popen.stdout.close()
+    return_code = popen.wait()
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, cmd)
+
+#
 # Set the maximum recursion depth to 2000
 sys.setrecursionlimit(20000)
 
@@ -20,6 +34,7 @@ class Watermark():
         self.limiting = True
         self.N = N
         self.s = None
+        self.info = None
         self.w = self.make_watermark(0.5)
         self.r = None
         self.Nr = None
@@ -27,6 +42,7 @@ class Watermark():
         self.B_store  = defaultdict(dict)
         self.priors = None
         self.using_edge = False # whether to use the rigt-most column of the trellis
+        self.data = None
 
     def reset_store(self):
         # reset forward and backward probabilities 
@@ -224,6 +240,31 @@ class Watermark():
             else:
                 new.append(s2[i])
         return new
+    
+    def bin_list_to_file(self, ls, file):
+        with open(file, 'w') as f:
+            for l in ls:
+                f.write(str(l))
+    
+    def list_to_file(self, ls, file):
+        with open(file, 'w') as f:
+            for l in ls:
+                f.write(str(l) + ' ')
+    
+    def c_decode(self, llr_file, prior_file=None, test_name="t1"):
+        N_data = len(self.info)
+        print(self.Nr)
+        if not prior_file:
+            self.list_to_file([0.5]*N_data, f"{test_name}_outp")
+            prior_file = f"{test_name}_outp"
+        self.list_to_file(self.r, f"{test_name}_r")
+        self.list_to_file(self.info, f"{test_name}_info")
+        self.list_to_file(self.w, f"{test_name}_w")
+        self.list_to_file(self.data, f"{test_name}_d")
+        water_path = os.path.join(os.path.dirname(__file__), 'WaterDecode')
+        execute(water_path + ' ' + prior_file + ' ' + llr_file + ' ' + f"{test_name}_r" + ' ' + f"{test_name}_info" + \
+                       ' ' + f"{test_name}_w" + ' ' + str(self.N) + ' ' + str(self.Nr) + ' ' + str(N_data) + ' ' + \
+                          str(0.04) + ' ' + f"{test_name}_d")
     
     def decode(self, llr_file, prior_file=None):
         # Takes in priors file and writes llr file
